@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: WebSocket Chat Application with Correct Permissions
+
+Resources:
+  # WebSocket API
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties: 
+      Name: !Sub "chatapp-websocket-api-${AWS::StackName}"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  # WebSocket API Deployment
+  WebSocketApiDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    Properties:
+      ApiId: !Ref WebSocketApi
+    DependsOn: 
+      - ConnectRoute
+      - DisconnectRoute
+      - SendMessageRoute
+
+  # WebSocket API Stage
+  WebSocketApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      DeploymentId: !Ref WebSocketApiDeployment
+      StageName: production
+      AutoDeploy: true
+
+  # WebSocket API Routes
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${ConnectIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${DisconnectIntegration}"
+
+  SendMessageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: sendMessage
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${SendMessageIntegration}"
+
+  # WebSocket API Integrations
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectLambda.Arn}/invocations"
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DisconnectLambda.Arn}/invocations"
+
+  SendMessageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SendMessageLambda.Arn}/invocations"
+
+  # DynamoDB Table
+  ChatAppTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "chatapp_table_${AWS::StackName}"
+      AttributeDefinitions:
+        - AttributeName: connection_id
+          AttributeType: S
+        - AttributeName: random_user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connection_id
+          KeyType: HASH
+        - AttributeName: random_user_id
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: random_user_id-index
+          KeySchema:
+            - AttributeName: random_user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # Lambda Functions
+  ConnectLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "chatapp_connect_${AWS::StackName}"
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      CodeUri: lambda/connect/
+      Policies:
+        - AmazonDynamoDBFullAccess
+        - AmazonAPIGatewayInvokeFullAccess
+      Environment:
+        Variables:
+          WEBSOCKET_API_URL: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production/"
+          TABLE_NAME: !Ref ChatAppTable
+
+  DisconnectLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "chatapp_disconnect_${AWS::StackName}"
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      CodeUri: lambda/disconnect/
+      Policies:
+        - AmazonDynamoDBFullAccess
+        - AmazonAPIGatewayInvokeFullAccess
+      Environment:
+        Variables:
+          WEBSOCKET_API_URL: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production/"
+          TABLE_NAME: !Ref ChatAppTable
+
+  SendMessageLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "chatapp_sendMessage_${AWS::StackName}"
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      CodeUri: lambda/send_message/
+      Policies:
+        - AmazonDynamoDBFullAccess
+        - AmazonAPIGatewayInvokeFullAccess
+      Environment:
+        Variables:
+          WEBSOCKET_API_URL: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production/"
+          TABLE_NAME: !Ref ChatAppTable
+
+  # Permissions for API Gateway to Invoke Lambda
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ConnectLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect"
+
+  DisconnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DisconnectLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect"
+
+  SendMessageLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SendMessageLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/sendMessage"
+
+Outputs:
+  WebSocketApiUrl:
+    Description: URL of the WebSocket API
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production/"
